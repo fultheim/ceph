@@ -78,7 +78,7 @@ needed, though I won't work hard to stop it).
 I'm hoping that later down the line I can sit and spend more time with this-- it would be nice, for example, if we could
 use memory provided by the caller.
 
-Additionally, this mechanim is mostly obviated by forwarding the work to zpp_bits, but keeping it here provides an additional
+Additionally, this mechanism is mostly obviated by forwarding the work to zpp_bits, but keeping it here provides an additional
 hook "ahead" of that library, and indeed eliminates any actual dependency on it-- we use it to smooth out a few areas where
 zpp_bits is designed for serialization ONLY rather than also playing nice with some conversions, especially those where the
 input and output sizes of an array may not match.
