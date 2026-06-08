@@ -51,6 +51,11 @@ dec_ref_ret dec_ref(omap_context_t oc, T&& addr) {
   ).discard_result();
 }
 
+// Retire two nodes (this + sibling) sequentially.
+static dec_ref_ret retire_two(omap_context_t oc, laddr_t a, laddr_t b) {
+  return dec_ref(oc, a).si_then([b, oc] { return dec_ref(oc, b); });
+}
+
 /**
  * make_split_insert
  *
@@ -450,9 +455,17 @@ OMapInnerNode::make_split_children(omap_context_t oc)
       auto right = ext_pair.back();
       DEBUGT("this: {}, split into: l {} r {}", oc.t, *this, *left, *right);
       this->split_child_ptrs(oc.t, *left, *right);
-      return split_children_ret(
-             interruptible::ready_future_marker{},
-             std::make_tuple(left, right, split_into(*left, *right)));
+      auto pivot = split_into(*left, *right);
+      // The old inner node is replaced by the split children. Retire its logical
+      // address to reclaim physical space and avoid extent leaks.
+      return dec_ref(oc, get_laddr()).si_then(
+        [left=std::move(left), right=std::move(right),
+         pivot=std::move(pivot)] () mutable {
+        return split_children_ret(
+               interruptible::ready_future_marker{},
+               std::make_tuple(std::move(left), std::move(right),
+                               std::move(pivot)));
+      });
   }).handle_error_interruptible(
     crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
     split_children_iertr::pass_further{}
@@ -470,9 +483,15 @@ OMapInnerNode::make_full_merge(omap_context_t oc, OMapNodeRef right)
       replacement->merge_child_ptrs(
 	oc.t, *this, *right->cast<OMapInnerNode>());
       replacement->merge_from(*this, *right->cast<OMapInnerNode>());
-      return full_merge_ret(
-        interruptible::ready_future_marker{},
-        std::move(replacement));
+      auto right_laddr = right->get_laddr();
+      // Both the current and sibling inner nodes are merged into a single replacement.
+      // Retire both old logical addresses to reclaim their physical space.
+      return retire_two(oc, get_laddr(), right_laddr
+      ).si_then([replacement=std::move(replacement)] () mutable {
+        return full_merge_ret(
+          interruptible::ready_future_marker{},
+          std::move(replacement));
+      });
   }).handle_error_interruptible(
     crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
     full_merge_iertr::pass_further{}
@@ -487,18 +506,29 @@ OMapInnerNode::make_balanced(
   DEBUGT("l: {}, r: {}", oc.t, *this, *_right);
   ceph_assert(_right->get_type() == TYPE);
   auto &right = *_right->cast<OMapInnerNode>();
+  auto right_laddr = _right->get_laddr();
   return oc.tm.alloc_extents<OMapInnerNode>(oc.t, oc.hint,
     OMAP_INNER_BLOCK_SIZE, 2)
-    .si_then([this, &right, pivot_idx, oc] (auto &&replacement_pair){
+    .si_then([this, &right, pivot_idx, oc, right_laddr]
+             (auto &&replacement_pair){
       auto replacement_left = replacement_pair.front();
       auto replacement_right = replacement_pair.back();
       this->balance_child_ptrs(oc.t, *this, right, pivot_idx,
 			       *replacement_left, *replacement_right);
-      return make_balanced_ret(
-             interruptible::ready_future_marker{},
-             std::make_tuple(replacement_left, replacement_right,
-                             balance_into_new_nodes(*this, right, pivot_idx,
-                               *replacement_left, *replacement_right)));
+      auto pivot = balance_into_new_nodes(*this, right, pivot_idx,
+                       *replacement_left, *replacement_right);
+      // The current and sibling inner nodes are balanced into new replacements.
+      // Retire both original logical addresses to reclaim physical space.
+      return retire_two(oc, get_laddr(), right_laddr
+      ).si_then([replacement_left=std::move(replacement_left),
+                 replacement_right=std::move(replacement_right),
+                 pivot=std::move(pivot)] () mutable {
+        return make_balanced_ret(
+               interruptible::ready_future_marker{},
+               std::make_tuple(std::move(replacement_left),
+                               std::move(replacement_right),
+                               std::move(pivot)));
+      });
   }).handle_error_interruptible(
     crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
     make_balanced_iertr::pass_further{}
@@ -962,12 +992,20 @@ OMapLeafNode::make_split_children(omap_context_t oc)
   LOG_PREFIX(OMapLeafNode::make_split_children);
   DEBUGT("this: {}", oc.t, *this);
   return oc.tm.alloc_extents<OMapLeafNode>(oc.t, oc.hint, get_len(), 2)
-    .si_then([this] (auto &&ext_pair) {
+    .si_then([this, oc] (auto &&ext_pair) {
       auto left = ext_pair.front();
       auto right = ext_pair.back();
-      return split_children_ret(
-             interruptible::ready_future_marker{},
-             std::make_tuple(left, right, split_into(*left, *right)));
+      auto pivot = split_into(*left, *right);
+      // The old leaf node is replaced by the split children. Retire its logical
+      // address to reclaim physical space and avoid extent leaks.
+      return dec_ref(oc, get_laddr()).si_then(
+        [left=std::move(left), right=std::move(right),
+         pivot=std::move(pivot)] () mutable {
+        return split_children_ret(
+               interruptible::ready_future_marker{},
+               std::make_tuple(std::move(left), std::move(right),
+                               std::move(pivot)));
+      });
   }).handle_error_interruptible(
     crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
     split_children_iertr::pass_further{}
@@ -981,11 +1019,17 @@ OMapLeafNode::make_full_merge(omap_context_t oc, OMapNodeRef right)
   LOG_PREFIX(OMapLeafNode::make_full_merge);
   DEBUGT("this: {}", oc.t, *this);
   return oc.tm.alloc_non_data_extent<OMapLeafNode>(oc.t, oc.hint, get_len())
-    .si_then([this, right] (auto &&replacement) {
+    .si_then([this, right, oc] (auto &&replacement) {
       replacement->merge_from(*this, *right->cast<OMapLeafNode>());
-      return full_merge_ret(
-        interruptible::ready_future_marker{},
-        std::move(replacement));
+      auto right_laddr = right->get_laddr();
+      // Both the current and sibling leaf nodes are merged into a single replacement.
+      // Retire both old logical addresses to reclaim their physical space.
+      return retire_two(oc, get_laddr(), right_laddr
+      ).si_then([replacement=std::move(replacement)] () mutable {
+        return full_merge_ret(
+          interruptible::ready_future_marker{},
+          std::move(replacement));
+      });
   }).handle_error_interruptible(
     crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
     full_merge_iertr::pass_further{}
@@ -999,18 +1043,27 @@ OMapLeafNode::make_balanced(
   ceph_assert(_right->get_type() == TYPE);
   LOG_PREFIX(OMapLeafNode::make_balanced);
   DEBUGT("this: {}",  oc.t, *this);
+  auto right_laddr = _right->get_laddr();
   return oc.tm.alloc_extents<OMapLeafNode>(oc.t, oc.hint, get_len(), 2)
-    .si_then([this, _right, pivot_idx] (auto &&replacement_pair) {
+    .si_then([this, _right, pivot_idx, oc, right_laddr]
+             (auto &&replacement_pair) {
       auto replacement_left = replacement_pair.front();
       auto replacement_right = replacement_pair.back();
       auto &right = *_right->cast<OMapLeafNode>();
-      return make_balanced_ret(
-             interruptible::ready_future_marker{},
-             std::make_tuple(
-               replacement_left, replacement_right,
-               balance_into_new_nodes(
-                 *this, right, pivot_idx,
-                 *replacement_left, *replacement_right)));
+      auto pivot = balance_into_new_nodes(*this, right, pivot_idx,
+                       *replacement_left, *replacement_right);
+      // The current and sibling leaf nodes are balanced into new replacements.
+      // Retire both original logical addresses to reclaim physical space.
+      return retire_two(oc, get_laddr(), right_laddr
+      ).si_then([replacement_left=std::move(replacement_left),
+                 replacement_right=std::move(replacement_right),
+                 pivot=std::move(pivot)] () mutable {
+        return make_balanced_ret(
+               interruptible::ready_future_marker{},
+               std::make_tuple(std::move(replacement_left),
+                               std::move(replacement_right),
+                               std::move(pivot)));
+      });
   }).handle_error_interruptible(
     crimson::ct_error::enospc::assert_failure{"unexpected enospc"},
     make_balanced_iertr::pass_further{}
