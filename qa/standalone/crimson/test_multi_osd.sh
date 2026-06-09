@@ -324,9 +324,9 @@ monitor_iter() {
         w=0
         log_path="$BASE_DIR/out/osd.$i.log"
         if [ -r "$log_path" ]; then
-            log_sums=$(tail -n 5000 "$log_path" 2>/dev/null \
+            log_sums=$(grep -F "[WAF]" "$log_path" 2>/dev/null \
                 | awk '
-                    /\[WAF\]/ {
+                    {
                         if (match($0, /\[shard ([0-9]+):/, s) && \
                             match($0, /user_written=([0-9]+)/, uu) && \
                             match($0, /device_written=([0-9]+)/, dd)) {
