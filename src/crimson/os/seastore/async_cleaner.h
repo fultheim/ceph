@@ -1883,6 +1883,27 @@ public:
     return total;
   }
 
+  // Bytes allocated in the AVL allocator across all RBM devices.
+  // get_size() returns the data section only (journal already excluded).
+  uint64_t get_allocator_used_bytes() const {
+    uint64_t used = 0;
+    for (auto *rbm : rb_group->get_rb_managers()) {
+      uint64_t data = rbm->get_size();
+      uint64_t free = static_cast<uint64_t>(rbm->get_free_blocks())
+                     * rbm->get_block_size();
+      used += (data > free) ? (data - free) : 0;
+    }
+    return used;
+  }
+
+  bool is_storage_full() const final {
+    auto data_capacity = get_total_bytes() - get_journal_bytes();
+    if (data_capacity == 0) return false;
+    auto headroom = data_capacity / 100;
+    return get_allocator_used_bytes() + stats.projected_used_bytes
+         + headroom > data_capacity;
+  }
+
   // Testing interfaces
 
   bool check_usage(bool has_cold_tier) final;
