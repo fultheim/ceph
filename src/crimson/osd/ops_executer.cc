@@ -609,6 +609,27 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
     "handling op {} on object {}",
     ceph_osd_op_name(osd_op.op.op),
     get_target());
+  // Best-effort near-full gate: refuse data-allocating ops with -ENOSPC
+  // before a transaction is created. A small race between this check and
+  // alloc_new_data_extents remains; the assert_failure sites in
+  // object_data_handler.cc stay as a safety net for that case.
+  switch (osd_op.op.op) {
+  case CEPH_OSD_OP_CREATE:
+  case CEPH_OSD_OP_WRITE:
+  case CEPH_OSD_OP_WRITEFULL:
+  case CEPH_OSD_OP_WRITESAME:
+  case CEPH_OSD_OP_APPEND:
+  case CEPH_OSD_OP_ZERO:
+  case CEPH_OSD_OP_TRUNCATE:
+  case CEPH_OSD_OP_ROLLBACK:
+  case CEPH_OSD_OP_COPY_FROM2:
+    if (pg->get_shard_services().is_local_storage_full(pg->get_store_index())) {
+      return crimson::ct_error::enospc::make();
+    }
+    break;
+  default:
+    break;
+  }
   switch (const ceph_osd_op& op = osd_op.op; op.op) {
   case CEPH_OSD_OP_SYNC_READ:
     [[fallthrough]];

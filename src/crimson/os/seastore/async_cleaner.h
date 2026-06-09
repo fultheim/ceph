@@ -1231,6 +1231,10 @@ public:
 
   virtual void release_projected_usage(std::size_t) = 0;
 
+  // Returns true when the allocator is near-full and writes should be
+  // refused. Only RBMCleaner overrides this; SegmentCleaner returns false.
+  virtual bool is_storage_full() const { return false; }
+
   virtual bool should_block_io_on_clean() const = 0;
 
   virtual bool can_clean_space() const = 0;
@@ -1887,6 +1891,8 @@ public:
     // TODO
     return true;
   }
+
+
 
 private:
   bool equals(const RBMSpaceTracker &other) const;

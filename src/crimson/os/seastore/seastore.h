@@ -191,6 +191,11 @@ public:
         max_object_size);
     }
 
+    bool is_storage_full() const override final {
+      assert(transaction_manager);
+      return transaction_manager->is_storage_full();
+    }
+
     omap_root_t select_log_omap_root(Onode& onode) const;
 
   // only exposed to SeaStore
