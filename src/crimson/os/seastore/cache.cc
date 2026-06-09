@@ -1075,6 +1075,12 @@ void Cache::mark_transaction_conflicted(
       for (auto &i: t.pre_alloc_list) {
 	epm.mark_space_free(i->get_paddr(), i->get_length());
       }
+      if (epm.get_backend_type() == backend_type_t::SEGMENTED) {
+	size_t wasted = t.get_ool_write_stats().get_data_bytes();
+	if (wasted > 0) {
+	  epm.account_wasted_ool_bytes_segmented(wasted);
+	}
+      }
     }
 
     auto& ool_stats = t.get_ool_write_stats();

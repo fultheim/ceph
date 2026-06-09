@@ -1121,6 +1121,7 @@ RandomBlockOolWriter::alloc_write_ool_extents(
 	freed += e->get_length();
       }
       if (freed > 0) {
+        account_wasted_ool_bytes(freed);
 	rb_cleaner->deaccount_conflict_pending_free(freed);
       }
     }

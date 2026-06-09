@@ -837,7 +837,8 @@ seastar::future<> OSD::start_asok_admin()
     asok->register_command(
       make_asok_hook<DumpPGStateHistory>(std::as_const(pg_shard_manager)));
     asok->register_command(make_asok_hook<DumpMetricsHook>());
-    asok->register_command(make_asok_hook<DumpPerfCountersHook>());
+    asok->register_command(make_asok_hook<DumpPerfCountersHook>(std::string_view("perfcounters_dump")));
+    asok->register_command(make_asok_hook<DumpPerfCountersHook>(std::string_view("perf dump")));
     asok->register_command(make_asok_hook<AssertAlwaysHook>());
     asok->register_command(make_asok_hook<InjectDataErrorHook>(get_shard_services()));
     asok->register_command(make_asok_hook<InjectMDataErrorHook>(get_shard_services()));

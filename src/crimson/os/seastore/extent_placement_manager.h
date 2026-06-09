@@ -80,10 +80,24 @@ public:
   }
 
   writer_stats_t get_stats() const final {
-    return record_submitter.get_stats();
+    writer_stats_t ret = record_submitter.get_stats();
+    uint64_t wasted_delta = wasted_data_bytes_ - last_wasted_data_bytes_;
+    if (wasted_delta >= ret.data_bytes) {
+      ret.data_bytes = 0;
+    } else {
+      ret.data_bytes -= wasted_delta;
+    }
+    last_wasted_data_bytes_ = wasted_data_bytes_;
+    return ret;
+  }
+
+  void account_wasted_ool_bytes(size_t bytes) {
+    wasted_data_bytes_ += bytes;
   }
 
   open_ertr::future<> open() final {
+    wasted_data_bytes_ = 0;
+    last_wasted_data_bytes_ = 0;
     return record_submitter.open(store_index, false).discard_result();
   }
 
@@ -127,6 +141,8 @@ private:
   journal::SegmentAllocator segment_allocator;
   journal::RecordSubmitter record_submitter;
   seastar::gate write_guard;
+  uint64_t wasted_data_bytes_ = 0;
+  mutable uint64_t last_wasted_data_bytes_ = 0;
 };
 
 
@@ -142,14 +158,27 @@ public:
   writer_stats_t get_stats() const final {
     writer_stats_t ret = w_stats;
     ret.minus(last_w_stats);
+    uint64_t wasted_delta = wasted_data_bytes_ - last_wasted_data_bytes_;
+    if (wasted_delta >= ret.data_bytes) {
+      ret.data_bytes = 0;
+    } else {
+      ret.data_bytes -= wasted_delta;
+    }
     last_w_stats = w_stats;
+    last_wasted_data_bytes_ = wasted_data_bytes_;
     return ret;
+  }
+
+  void account_wasted_ool_bytes(size_t bytes) {
+    wasted_data_bytes_ += bytes;
   }
 
   using open_ertr = ExtentOolWriter::open_ertr;
   open_ertr::future<> open() final {
     w_stats = {};
     last_w_stats = {};
+    wasted_data_bytes_ = 0;
+    last_wasted_data_bytes_ = 0;
     return open_ertr::now();
   }
 
@@ -218,6 +247,8 @@ private:
   seastar::gate write_guard;
   writer_stats_t w_stats;
   mutable writer_stats_t last_w_stats;
+  uint64_t wasted_data_bytes_ = 0;
+  mutable uint64_t last_wasted_data_bytes_ = 0;
 };
 
 struct cleaner_usage_t {
@@ -324,6 +355,20 @@ public:
 
   store_statfs_t get_stat() const {
     return background_process.get_stat();
+  }
+
+  void account_wasted_ool_bytes_rbm(size_t bytes) {
+    auto* writer = get_writer(data_category_t::DATA, OOL_GENERATION);
+    if (writer && writer->get_type() == backend_type_t::RANDOM_BLOCK) {
+      static_cast<RandomBlockOolWriter*>(writer)->account_wasted_ool_bytes(bytes);
+    }
+  }
+
+  void account_wasted_ool_bytes_segmented(size_t bytes) {
+    auto* writer = get_writer(data_category_t::DATA, OOL_GENERATION);
+    if (writer && writer->get_type() == backend_type_t::SEGMENTED) {
+      static_cast<SegmentedOolWriter*>(writer)->account_wasted_ool_bytes(bytes);
+    }
   }
 
   device_stats_t get_device_stats(
