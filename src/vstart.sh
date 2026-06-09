@@ -438,6 +438,9 @@ case $1 in
         nodaemon=1
         msgr=2
         ;;
+    --null-blk)
+        null_blk_enabled=1
+        ;;
     --crimson-foreground)
         crimson=1
         ceph_osd=crimson-osd
@@ -932,8 +935,10 @@ EOF
     fi
 
     if [ "$objectstore" == "seastore" ]; then
+      SEASTORE_OPTS="
+        seastore_require_partition_count_match_reactor_count = false"
       if [[ ${seastore_size+x} ]]; then
-        SEASTORE_OPTS="
+        SEASTORE_OPTS+="
         seastore device size = $seastore_size"
       fi
     fi
@@ -1267,10 +1272,23 @@ start_osd() {
         fi
     fi
 	if [ "$new" -eq 1 -o $inc_osd_num -gt 0 ]; then
+            local crimson_cpu_set_val="$osd"
+            if [ -n "${cpu_table[$osd]:-}" ]; then
+                crimson_cpu_set_val="${cpu_table[$osd]}"
+            fi
             wconf <<EOF
 [osd.$osd]
         host = $HOSTNAME
+        crimson_cpu_set = $crimson_cpu_set_val
+        crimson_alien_thread_cpu_cores = $osd
+        ms_bind_port_min = $((6800 + osd * 10))
+        ms_bind_port_max = $((6800 + osd * 10 + 9))
 EOF
+            if [ "$objectstore" == "seastore" -a -n "${block_devs[$osd]}" ]; then
+                wconf <<EOF
+        seastore_device_path = ${block_devs[$osd]}
+EOF
+            fi
 
             if [ "$osds_per_host" -gt 0 ]; then
                 wconf <<EOF
@@ -1731,6 +1749,21 @@ if [ $inc_osd_num -gt 0 ]; then
 fi
 
 if [ "$new" -eq 1 ]; then
+    # ${null_blk_enabled:-0} not just $null_blk_enabled — the var is only
+    # set in the --null-blk arm of the arg parser, so a run without that
+    # flag would otherwise hit "integer expression expected" here and
+    # skip the rest of the new-cluster bootstrap.
+    if [ "${null_blk_enabled:-0}" -eq 1 ]; then
+        for osd in `seq 0 $((CEPH_NUM_OSD-1))`
+        do
+            # Only fill slots that --seastore-devs (or similar) didn't set,
+            # so explicit per-OSD device paths take precedence over the
+            # blanket /dev/nullb<osd> default.
+            if [ -z "${block_devs[$osd]:-}" ]; then
+                block_devs[$osd]="/dev/nullb$osd"
+            fi
+        done
+    fi
     prepare_conf
 fi
 
@@ -1805,8 +1838,15 @@ EOF
 fi
 
 if [ "$ceph_osd" == "crimson-osd" ]; then
+    # When --reactor-backend was passed, the per-OSD crimson_reactor_backend
+    # config (set earlier) makes the OSD construct --reactor-backend itself
+    # from config; adding it to cmdline here would duplicate. Only set the
+    # cmdline default when no explicit backend was requested.
+    if [ -z "$crimson_reactor_backend" ]; then
+        extra_seastar_args+=" --reactor-backend linux-aio"
+    fi
      if [ "$debug" -ne 0 ]; then
-        extra_seastar_args=" --debug"
+        extra_seastar_args+=" --debug"
     fi
     if [ "$trace" -ne 0 ]; then
         extra_seastar_args=" --trace"
