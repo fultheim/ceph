@@ -32,14 +32,17 @@ SegmentManager::get_segment_manager(
     const std::string& device,
     device_type_t dtype)
 {
-  const std::string device_block = device + "/block";
+  std::string dev_path = crimson::common::local_conf().get_val<std::string>("seastore_device_path");
+  if (dev_path.empty()) {
+    dev_path = device + "/block";
+  }
 #ifdef HAVE_ZNS
   if (dtype == device_type_t::ZBD) {
     co_return std::make_unique<segment_manager::zbd::ZBDSegmentManager>(
-        device_block);
+        dev_path);
   }
 #endif
   co_return std::make_unique<segment_manager::block::BlockSegmentManager>(
-      device_block, dtype);
+      dev_path, dtype);
 }
 } // namespace crimson::os::seastore
