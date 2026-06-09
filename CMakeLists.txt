@@ -253,6 +253,16 @@ endif()
 
 option(WITH_CRIMSON "Build Crimson components" OFF)
 
+# SeaStore Write Amplification perf-counter instrumentation. The
+# counters live on the hot write path; we want them on by default in
+# WITH_CRIMSON is enabled (the counter code only exists inside
+# crimson's seastore objectstore). The user can still override
+# explicitly with -DWITH_SEASTORE_WAF_COUNTERS=ON/OFF.
+option(WITH_SEASTORE_WAF_COUNTERS
+  "Enable SeaStore Write Amplification perf counters"
+  ${WITH_CRIMSON})
+message(STATUS "WITH_SEASTORE_WAF_COUNTERS is ${WITH_SEASTORE_WAF_COUNTERS}")
+
 if(WITH_BLUESTORE OR WITH_CRIMSON)
   if(LINUX)
     find_package(aio)
