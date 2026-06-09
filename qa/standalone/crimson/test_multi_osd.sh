@@ -20,7 +20,8 @@ Mandatory:
                      Total cluster consumed address space = jobs x size.
 
 Optional fio knobs:
-  --bs SIZE          fio block size                  (default: 1M)
+  --bs SIZE|SPEC     block size (default: 1M) or bssplit spec,
+                     e.g. 4k/20:16k/20:64k/20:256k/20:1m/20
   --iodepth N        fio iodepth per job             (default: 32)
   --rw PATTERN       fio rw type                     (default: randwrite)
   --fill             Run a sequential fio phase first to fill the cluster:
@@ -156,7 +157,17 @@ size_to_bytes() {
     esac
 }
 SIZE_BYTES=$(size_to_bytes "$SIZE")
-BS_BYTES=$(size_to_bytes "$BS")
+if [[ "$BS" == *:* ]]; then
+    BS_LINE="bssplit=$BS"
+    BS_BYTES=0
+    for _entry in ${BS//:/ }; do
+        _b=$(size_to_bytes "${_entry%%/*}")
+        [ "$_b" -gt "$BS_BYTES" ] && BS_BYTES=$_b
+    done
+else
+    BS_LINE="bs=$BS"
+    BS_BYTES=$(size_to_bytes "$BS")
+fi
 # fio's nrfiles is PER JOB — total objects = numjobs * nrfiles. To target
 # TOTAL_OBJECTS = SIZE / BS (one object per bs across the address space),
 # divide by numjobs. Each job then gets nrfiles_per_job = TOTAL / numjobs.
@@ -182,7 +193,7 @@ clientname=admin
 pool=$POOL
 conf=$CEPH_BUILD/ceph.conf
 rw=$RW
-bs=$BS
+$BS_LINE
 iodepth=$IODEPTH
 numjobs=$JOBS
 nrfiles=$NRFILES
@@ -207,7 +218,7 @@ fi
 log "[bench] generated $FIO_JOB"
 log "[bench]   total: size=$SIZE iosize=$IOSIZE  objects=$((JOBS * NRFILES)) of ${BS} each"
 log "[bench]   per-job (×$JOBS): size=${PER_JOB_SIZE}B io_size=${PER_JOB_IOSIZE}B nrfiles=$NRFILES rate=${RATE:-unlimited}"
-log "[bench]   bs=$BS iodepth=$IODEPTH rw=$RW pool=$POOL osds=$NUM_OSDS"
+log "[bench]   $BS_LINE iodepth=$IODEPTH rw=$RW pool=$POOL osds=$NUM_OSDS"
 log "[bench]   monitor: period=${PERIOD}s stall-watchdog=${STALL_MULTI} samples (~$((PERIOD * STALL_MULTI))s window)"
 
 export CEPH_KEYRING="$CEPH_BUILD/keyring"
@@ -237,7 +248,7 @@ clientname=admin
 pool=$POOL
 conf=$CEPH_BUILD/ceph.conf
 rw=write
-bs=$BS
+$BS_LINE
 iodepth=$IODEPTH
 numjobs=$JOBS
 nrfiles=$NRFILES

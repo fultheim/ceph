@@ -260,6 +260,17 @@ kills fio when counters stop advancing for `--stall-multi × --period`
 seconds, and detects OSD crashes by combining `ceph status` with asok
 responsiveness probes.
 
+`--bs` also accepts a fio `bssplit` spec to drive mixed block sizes in a
+single run:
+
+```sh
+--bs 4k/20:16k/20:64k/20:256k/20:1m/20
+```
+
+Each entry is `size/weight`; weights must sum to 100. The `nrfiles`
+calculation uses the largest block size in the spec so objects are always
+large enough for the biggest IO.
+
 ### WAF perf counters (optional)
 
 When the binary is built with `WITH_CRIMSON=ON` (`WITH_SEASTORE_WAF_COUNTERS`
