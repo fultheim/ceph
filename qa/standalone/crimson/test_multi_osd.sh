@@ -24,6 +24,12 @@ Optional fio knobs:
                      e.g. 4k/20:16k/20:64k/20:256k/20:1m/20
   --iodepth N        fio iodepth per job             (default: 32)
   --rw PATTERN       fio rw type                     (default: randwrite)
+  --no-repeat        Disable norandommap (fio tracks written blocks and avoids
+                     repeating them; each block written at most once per pass).
+                     Default is norandommap=1 (stateless random writes, repeats
+                     allowed), which is correct for steady-state WAF benchmarks.
+                     Use --no-repeat for fragmentation scenarios where you want
+                     full, non-overlapping coverage before any block is revisited.
   --fill             Run a sequential fio phase first to fill the cluster:
                      nrfiles objects with --size bytes of data, then run
                      the main --rw phase. Useful when --size pushes the
@@ -66,6 +72,7 @@ STALL_MULTI=15
 DO_TEARDOWN=0
 RATE=""
 FILL=0
+NO_REPEAT=0
 BASE_DIR=""
 
 while [[ $# -gt 0 ]]; do
@@ -83,6 +90,7 @@ while [[ $# -gt 0 ]]; do
         --no-teardown)  DO_TEARDOWN=0; shift ;;
         --rate)         RATE="$2"; shift 2 ;;
         --fill)         FILL=1; shift ;;
+        --no-repeat)    NO_REPEAT=1; shift ;;
         -h|--help)      usage ;;
         --) shift; break ;;
         -*) echo "Unknown flag: $1" >&2; usage ;;
@@ -198,7 +206,7 @@ iodepth=$IODEPTH
 numjobs=$JOBS
 nrfiles=$NRFILES
 randrepeat=0
-norandommap=1
+norandommap=$((1 - NO_REPEAT))
 file_service_type=random
 log_avg_msec=1000
 write_bw_log=fio_write_bw
