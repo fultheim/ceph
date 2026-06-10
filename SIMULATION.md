@@ -303,8 +303,16 @@ git checkouts is `Debug`.
 **Build:**
 
 ```sh
-PATH=/usr/bin:/bin ninja -C build -j$(nproc) vstart-base crimson-osd cython_rados
+PATH=/usr/bin:/bin ninja -C build -j$(nproc) vstart-base crimson-osd cython_rados cython_cephfs
 ```
+
+`cython_cephfs` is required even though the simulation never touches CephFS:
+ceph-mgr imports the `cephfs` Python binding at module-load time
+(`mgr_util` does a top-level `import cephfs`). If that compiled binding is
+stale or missing, every mgr module fails to load with `module 'cephfs' has
+no attribute 'LibCephFS'` and the cluster never reaches a healthy state. Building
+it next to `cython_rados` keeps the Python bindings in sync with the C++
+libraries.
 
 **Run** (canonical 90 GiB RBM benchmark, tears down on completion):
 
