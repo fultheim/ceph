@@ -22,7 +22,7 @@ PATH=/usr/bin:/bin ARGS="-DWITH_CRIMSON=ON -DCMAKE_BUILD_TYPE=Release" ./do_cmak
 ### 1. Build
 Wait for build completion before starting the Run command.
 ```bash
-PATH=/usr/bin:/bin ninja -C build -j$(nproc) vstart-base crimson-osd cython_rados
+PATH=/usr/bin:/bin ninja -C build -j$(nproc) vstart-base crimson-osd cython_rados cython_cephfs
 ```
 
 ### 2. Run
