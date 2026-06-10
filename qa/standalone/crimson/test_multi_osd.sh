@@ -207,6 +207,8 @@ numjobs=$JOBS
 nrfiles=$NRFILES
 randrepeat=0
 norandommap=$((1 - NO_REPEAT))
+create_on_open=1
+touch_objects=0
 file_service_type=random
 log_avg_msec=1000
 write_bw_log=fio_write_bw
@@ -262,6 +264,8 @@ numjobs=$JOBS
 nrfiles=$NRFILES
 randrepeat=0
 norandommap=1
+create_on_open=1
+touch_objects=0
 file_service_type=random
 
 [fill]
