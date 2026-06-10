@@ -1187,8 +1187,17 @@ EOF
         run 'mon' $f $CEPH_BIN/ceph-mon -i $f $ARGS $CMON_ARGS
     done
 
+    # Wait for mon quorum before issuing any admin commands. Must pass
+    # -c "$conf_fn" because CEPH_CONF is not exported into vstart's env.
+    for _i in $(seq 1 60); do
+        if $CEPH_BIN/ceph -c "$conf_fn" quorum_status >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+
     if [ "$crimson" -eq 1 ]; then
-        $CEPH_BIN/ceph osd set-allow-crimson --yes-i-really-mean-it
+        $CEPH_BIN/ceph -c "$conf_fn" osd set-allow-crimson --yes-i-really-mean-it
     fi
 
     if [ -n "$require_osd_and_client_version" ]; then
