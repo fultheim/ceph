@@ -65,6 +65,17 @@ Options:
   --target-dirty-bytes SIZE    set seastore_target_journal_dirty_bytes. Caps
                                the per-shard dirty-extent cache footprint.
                                Default: unset (uses roll_size/3 for RBM).
+  --spdk[=tcp|vfiouser|TRID]   [TEST INFRA] drive seastore over SPDK instead of
+                               io_uring (sets seastore_spdk_transport_id).
+                               If set to "tcp" (default if no value given), stands
+                               up a RAM-backed nvmet-tcp loopback target.
+                               If set to "vfiouser", stands up a local target
+                               over vfio-user shared-memory transport.
+                               For a physical device, pass its PCIe Address or
+                               custom TRID string directly.
+  --spdk-dir DIR               [TEST INFRA] use a custom SPDK build directory (for
+                               target binaries & scripts). If not set, defaults
+                               to the bundled src/spdk source tree.
   --no-preflight               skip step 0
   --no-pool                    skip step 3 (no workload pool is created)
   --pool NAME                  workload pool name (default: waf-test)
@@ -97,6 +108,12 @@ SEGMENT_SIZE=""
 RBM_ENABLED=0
 RBM_SIZE_ARG=""
 RBM_META_SIZE_ARG=""
+SPDK_ENABLED=0
+SPDK_DIR_ARG=""         # custom SPDK build directory
+SPDK_LOCAL_TARGET=0     # 1 => stand up a local RAM target; 0 => use custom SPDK_TRID
+SPDK_TRANSPORT=""       # "tcp" or "vfiouser" when local target enabled
+SPDK_TRID=""            # custom/explicit SPDK transport id
+SPDK_HUGEPAGES=1024     # 2MiB hugepages to reserve for the SPDK/DPDK env
 CRIMSON_SMP=2
 CRIMSON_MEMORY=""
 CACHEPIN_PERSHARD=""
@@ -157,6 +174,26 @@ while [[ $# -gt 0 ]]; do
         --target-dirty-bytes)     TARGET_DIRTY_BYTES="$2"; shift 2 ;;
         --target-dirty-bytes=*)   TARGET_DIRTY_BYTES="${1#*=}"; shift ;;
         --no-preflight)           DO_PREFLIGHT=0; shift ;;
+        --spdk)
+            SPDK_ENABLED=1
+            SPDK_LOCAL_TARGET=1
+            SPDK_TRANSPORT="tcp"
+            shift
+            ;;
+        --spdk=*)
+            SPDK_ENABLED=1
+            VAL="${1#*=}"
+            if [ "$VAL" = "tcp" ] || [ "$VAL" = "vfiouser" ]; then
+                SPDK_LOCAL_TARGET=1
+                SPDK_TRANSPORT="$VAL"
+            else
+                SPDK_LOCAL_TARGET=0
+                SPDK_TRID="$VAL"
+            fi
+            shift
+            ;;
+        --spdk-dir)               SPDK_DIR_ARG="$2"; shift 2 ;;
+        --spdk-dir=*)             SPDK_DIR_ARG="${1#*=}"; shift ;;
         --no-pool)                DO_POOL=0; shift ;;
         --pool)                   POOL_NAME="$2"; shift 2 ;;
         --pool-pg)                POOL_PG="$2"; shift 2 ;;
@@ -489,6 +526,72 @@ if [ "$ENABLE_CRC_DATA" = "1" ]; then
 else
     echo "[crc] setting ms_crc_data=false in ceph.conf (default; pass --crc-data to enable)"
     VSTART_EXTRA+=(-o "ms_crc_data = false")
+fi
+if [ "$SPDK_ENABLED" = "1" ]; then
+    # --- SIMULATION/TEST INFRA: drive seastore over SPDK ---
+    # Reserve hugepages for the SPDK/DPDK env, then point seastore at an SPDK
+    # transport id. With local target, stand up a RAM-backed nvmf
+    # target (no NVMe hardware / vfio needed; the OSD connects over loopback/vfio-user).
+    # The SPDK nvmf_tgt malloc bdev is hugepage-backed, so the pool must hold
+    # the whole device plus both DPDK envs (target + OSD). For an explicit
+    # transport id (real device) only the OSD env needs pages.
+    if [ "$SPDK_LOCAL_TARGET" = "1" ]; then
+        SPDK_HUGEPAGES=$(( (SIZE_GB + 12) * 512 ))
+    fi
+    echo "[spdk] reserving $SPDK_HUGEPAGES x 2MiB hugepages"
+    echo "$SPDK_HUGEPAGES" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
+    # Retry once after dropping caches + compacting: a long-running host
+    # fragments memory and the first reservation can come up short.
+    SPDK_HUGEPAGES_GOT=$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages)
+    if [ "$SPDK_HUGEPAGES_GOT" -lt "$SPDK_HUGEPAGES" ]; then
+        sync
+        echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+        echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+        echo "$SPDK_HUGEPAGES" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
+        SPDK_HUGEPAGES_GOT=$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages)
+    fi
+    if [ "$SPDK_HUGEPAGES_GOT" -lt "$SPDK_HUGEPAGES" ]; then
+        echo "[spdk] ERROR: reserved only $SPDK_HUGEPAGES_GOT of $SPDK_HUGEPAGES hugepages;" \
+             "the host cannot hold a ${SIZE_GB}G RAM-backed target - reduce the per-OSD size" >&2
+        exit 1
+    fi
+    # The OSD runs unprivileged; let it create hugepage files in the default
+    # hugetlbfs mount.
+    sudo chmod 1777 /dev/hugepages
+    if [ "$SPDK_LOCAL_TARGET" = "0" ]; then
+        echo "[spdk] using provided transport id: $SPDK_TRID"
+    else
+        export CRIMSON_SPDK_DIR="${SPDK_DIR_ARG:-$CEPH_ROOT/src/spdk}"
+        echo "[spdk] setting up RAM-backed SPDK nvmf target (transport=$SPDK_TRANSPORT) using SPDK dir $CRIMSON_SPDK_DIR"
+        # Dynamically assign target cores using assign_crimson_cores.py to avoid conflicts with OSDs
+        TGT_CORES_STR=$(python3 "$SCRIPT_DIR/../../../src/tools/contrib/assign_crimson_cores.py" \
+            -o "$((NUM_OSDS + 1))" -r "$CRIMSON_SMP" -b osd --physical-only-seastar 2>/dev/null | tail -n 1)
+        if [ -n "$TGT_CORES_STR" ]; then
+            export CORE_MASK=$(python3 -c "
+import sys
+r = sys.argv[1]
+cpus = set()
+for p in r.split(','):
+    if '-' in p:
+        a, b = p.split('-')
+        cpus.update(range(int(a), int(b) + 1))
+    else:
+        cpus.add(int(p))
+mask = sum(1 << c for c in cpus)
+print(f'0x{mask:x}')
+" "$TGT_CORES_STR")
+            echo "[spdk] dynamically assigning target to cores $TGT_CORES_STR (mask $CORE_MASK)"
+        else
+            export CORE_MASK="0xc" # fallback to cores 2-3
+            echo "[spdk] fallback: assigning target to cores 2-3 (mask $CORE_MASK)"
+        fi
+        SPDK_TRID=$("$SCRIPT_DIR/spdk_nvmet_setup.sh" setup "$SIZE_GB" "$SPDK_TRANSPORT")
+        echo "[spdk] transport id: $SPDK_TRID"
+    fi
+    VSTART_EXTRA+=(-o "seastore_spdk_transport_id = $SPDK_TRID")
+    # The loopback nvmet-tcp/vfio-user target has no IOMMU and the OSD is unprivileged, but
+    # does no device DMA, so force VA addressing for the DPDK env.
+    VSTART_EXTRA+=(-o "seastore_spdk_iova_mode = va")
 fi
 if [ "$RBM_ENABLED" = "1" ]; then
     echo "[seastore] RBM enabled: setting seastore_main_device_type=RANDOM_BLOCK_SSD"

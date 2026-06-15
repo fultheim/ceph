@@ -80,6 +80,19 @@ fi
 echo "Tearing down emulated devices..."
 "$SCRIPT_DIR/setup_osd_emul.sh" --teardown "$BASE_DIR"
 
+# 3b. Teardown the SPDK test nvmet-tcp target, if --spdk set one up (idempotent),
+# and release the hugepage reservation — a 60 GiB target locks ~62 GiB of RAM,
+# which would silently starve a subsequent non-SPDK (null_blk) run.
+if [ -x "$SCRIPT_DIR/spdk_nvmet_setup.sh" ]; then
+    "$SCRIPT_DIR/spdk_nvmet_setup.sh" teardown >/dev/null 2>&1 || true
+    # Clean up any orphaned SPDK hugepage mapping files so the kernel can release the memory
+    sudo rm -f /dev/hugepages/spdk_pid* 2>/dev/null || true
+    if [ "$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages 2>/dev/null || echo 0)" -gt 0 ]; then
+        echo 0 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null || true
+        echo "Released SPDK hugepage reservation"
+    fi
+fi
+
 # 4. Strip any netem qdisc that start_multi_osd.sh added to lo.
 if tc qdisc show dev lo 2>/dev/null | grep -q netem; then
     sudo tc qdisc del dev lo root 2>/dev/null || true
