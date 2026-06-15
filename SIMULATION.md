@@ -77,6 +77,59 @@ Useful when measuring Crimson software latency without kernel-block-
 layer IRQ noise, or when comparing the simulation against a real
 SPDK+NVMe deployment.
 
+### SPDK mode (`--spdk`)
+
+`--spdk[=tcp|vfiouser|TRID]` drives SeaStore over the SPDK userspace polled NVMe driver
+instead of io_uring, by setting the `seastore_spdk_transport_id` config option.
+It works with both the segmented (default) and RBM (`--rbm`) backends; it is not
+supported for ZBD (zoned) devices, which the OSD refuses at mkfs/mount.
+
+Requires `crimson-osd` built with `WITH_SPDK=ON` (see
+[Build](#build)).
+
+#### RAM-backed Loopback Target Modes (No NVMe hardware required)
+
+If no explicit transport id is given, `--spdk` (or `--spdk=tcp`) stands up
+a RAM-backed NVMe-over-Fabrics TCP target on loopback using SPDK's own
+`nvmf_tgt` (`spdk_nvmet_setup.sh`: malloc bdevs striped raid0, ≤15 GiB each,
+60 GiB device max) and points the OSD's SPDK initiator at it over TCP. Target
+and OSD are two unprivileged DPDK primaries — both run IOVA=VA with per-PID
+DPDK file prefixes; no vfio binding and no root. `--spdk` reserves 2 MiB
+hugepages sized for the target device plus both DPDK envs; `stop_multi_osd.sh`
+tears the target down idempotently and releases the hugepage reservation.
+
+If `--spdk=vfiouser` is specified, the harness stands up the RAM-backed target
+over the **vfio-user** shared-memory local transport instead of nvmf-tcp loopback
+(`spdk_nvmet_setup.sh ... vfiouser`: `nvmf_create_transport -t VFIOUSER`, a
+`VFIOUSER` listener on a unix socket dir). The target DMAs straight from the
+OSD's hugepages — **zero transport copies and no TCP initiator on the reactor**
+— so it is markedly faster than TCP loopback (measured ~+47%: 2.2 GB/s vs 1.5 GB/s
+on a 60 GiB / 8-job randwrite). Requires SPDK built `--with-vfio-user`.
+
+Like TCP loopback, vfio-user defaults to using the Ceph bundled `src/spdk` source
+tree for the target binaries and scripts, unless a custom path is specified via
+`--spdk-dir DIR` (or `CRIMSON_SPDK_DIR` environment variable).
+
+**Memory pinning (required, automatic for vfio-user).** libvfio-user caps a
+connection at 64 DMA regions. The OSD therefore **pre-allocates a fixed, contiguous
+DPDK heap** (`seastore_spdk_mem_size_mb`, default 10 GiB for vfio-user) instead of
+growing it on demand — a dynamic heap fragments into >64 regions under load and
+the target then fails to map the I/O ("`GPA to VVA failed`" in the target log →
+OSD aborts with `extent checksum inconsistent` / EIO). The default fits the
+harness's `(SIZE+12) GiB` hugepage budget; raise it (`-o seastore_spdk_mem_size_mb=N`)
+only if a heavier workload's DMA working set exceeds it (a workload that needs far
+more would want boot-time 1 GiB hugepages so each region is ≥ 1 GiB).
+
+#### Real hardware target
+
+To target a real vfio-bound NVMe device instead, pass its transport id
+explicitly, e.g. `--spdk=0000:01:00.0` or a full SPDK transport ID (the host
+must already be set up: device bound to `vfio-pci`, hugepages allocated).
+
+Prerequisites for the loopback targets: passwordless `sudo` (hugepage
+reservation, `chmod 1777 /dev/hugepages`) — the same privileges the memory
+backing path already relies on.
+
 ### Wire CRC and the `--crc-data` flag
 
 `start_multi_osd.sh` sets `ms_crc_data = false` on the cluster by
@@ -313,6 +366,64 @@ stale or missing, every mgr module fails to load with `module 'cephfs' has
 no attribute 'LibCephFS'` and the cluster never reaches a healthy state. Building
 it next to `cython_rados` keeps the Python bindings in sync with the C++
 libraries.
+**SPDK build (optional, for SPDK mode):** add
+`-DWITH_SPDK=ON` to the configure step.
+
+> **Phase 12: Crimson uses a *system* SPDK (≥ 25.05), not the bundled fork.**
+> When `WITH_CRIMSON && WITH_SPDK`, the build forces `WITH_SYSTEM_SPDK=ON` and
+> links a system SPDK found via `pkg-config` (`Findspdk.cmake`, floor enforced
+> from `spdk/version.h`). The bundled `src/spdk` (v20.07) is no longer built for
+> Crimson; classic (non-Crimson) builds are unaffected. You must provide SPDK
+> 25.05 first — see **Prerequisite: build system SPDK 25.05** below.
+
+```sh
+# with PKG_CONFIG_PATH pointing at the SPDK 25.05 prefix (see below):
+PATH=/usr/bin:/bin ARGS="-DWITH_CRIMSON=ON -DWITH_SPDK=ON -DCMAKE_BUILD_TYPE=Release" ./do_cmake.sh
+PATH=/usr/bin:/bin ninja -C build -j$(nproc) crimson-osd
+```
+
+cmake should report `Found spdk: TRUE (found suitable version "25.5", minimum
+required is "25.05")`. If it fails with "need a system SPDK", `PKG_CONFIG_PATH`
+isn't pointing at the prefix.
+
+#### Prerequisite: build system SPDK 25.05
+
+Host tools: `meson` + `pyelftools` (`pip install --user meson pyelftools`),
+`nasm`, and `libcmocka-devel` (required by `--with-vfio-user`; build from source
+into the same prefix if the distro lacks it). Then:
+
+```sh
+git clone --branch v25.05 --depth 1 --recurse-submodules --shallow-submodules \
+  https://github.com/spdk/spdk.git spdk-25.05
+cd spdk-25.05
+PKG_CONFIG_PATH=$PWD/install/lib64/pkgconfig CFLAGS=-I$PWD/install/include \
+LDFLAGS="-L$PWD/install/lib64" \
+  ./configure --prefix=$PWD/install --with-shared --with-vfio-user
+make -j$(nproc) && make install
+# make install does NOT install libvfio-user.so* — copy it into the prefix so
+# crimson-osd (rpath) and nvmf_tgt (LD_LIBRARY_PATH) resolve it:
+cp -a build/libvfio-user/usr/local/lib/libvfio-user.so* install/lib/
+export PKG_CONFIG_PATH=$PWD/install/lib/pkgconfig:$PWD/install/lib64/pkgconfig
+pkg-config --modversion spdk_nvme    # prints the soname (e.g. 15.0), not 25.05
+```
+
+`--with-shared` is required (`Findspdk.cmake` links shared libs). The harness
+runs the nvmf target from this same tree (using the `--spdk-dir DIR` command-line option,
+or the `CRIMSON_SPDK_DIR` environment variable, which defaults to the Ceph bundled `src/spdk`
+source tree if not provided).
+
+#### Prerequisite: build system SPDK 26.05
+
+1. `git clone https://github.com/spdk/spdk.git spdk-26.05`
+2. `cd spdk-26.05/`
+3. `git checkout v26.05`
+4. `git submodule update --init --recursive`
+5. `PATH=/usr/bin:/bin ./configure --with-shared --with-vfio-user --prefix=/home/shai/Projects/spdk-26.05/install`
+6. `PATH=/usr/bin:/bin make -j`
+7. `PATH=/usr/bin:/bin make install`
+8. `cd ~/Projects/ceph.work/`
+9. `rm -rf build/CMakeCache.txt build/CMakeFiles; PKG_CONFIG_PATH=/home/shai/Projects/spdk-26.05/install/lib/pkgconfig PATH=/usr/bin:/bin cmake -B build -DWITH_CRIMSON=ON -DWITH_SPDK=ON -DCMAKE_BUILD_TYPE=Release -DWITH_SYSTEM_SPDK=ON -GNinja`
+10. `PATH=/usr/bin:/bin ninja -C build -j$(($(nproc)*2)) vstart-base crimson-osd cython_rados`
 
 **Run** (canonical 90 GiB RBM benchmark, tears down on completion):
 
@@ -381,6 +492,63 @@ sparse files and bind them via `losetup` with 4 KiB sector size:
 ```sh
 qa/standalone/crimson/start_multi_osd.sh --backing=file 4 64 build/dev
 ```
+
+### SPDK mode (memory-backed, no hardware)
+
+Drive SeaStore over SPDK against a RAM-backed loopback NVMe-oF target (requires
+the `WITH_SPDK` build above). The RAM-backed target maxes
+at 60 GiB (DPDK 20.05 caps one process at 64 GiB of 2 MiB hugepages per NUMA
+node; the device is striped raid0 over ≤15 GiB malloc bdevs):
+
+```sh
+qa/standalone/crimson/start_multi_osd.sh --spdk --rbm --no-balancer 1 60 build/dev && \
+qa/standalone/crimson/test_multi_osd.sh --jobs 8 --size 42g --iosize 1200g --rw randwrite
+```
+
+Drop `--rbm` for the segmented backend. To use a real NVMe device, pass its
+transport id: `--spdk=0000:01:00.0`.
+
+### vfio-user mode (shared-memory, faster) and TCP-vs-vfio-user comparison
+
+Same as SPDK mode but with the zero-copy shared-memory transport (requires SPDK
+built `--with-vfio-user`):
+
+```sh
+qa/standalone/crimson/start_multi_osd.sh --spdk=vfiouser --rbm --no-balancer 1 60 build/dev && \
+qa/standalone/crimson/test_multi_osd.sh --jobs 8 --size 42g --iosize 1200g --rw randwrite
+```
+
+To A/B the two transports, run each in turn and compare the `TOTAL bw=` line
+(tear down between runs). Pre-stage hugepages before back-to-back runs to avoid
+a reclaim stall on bring-up:
+
+```sh
+echo 36864 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+for T in tcp vfiouser; do
+  qa/standalone/crimson/stop_multi_osd.sh build/dev; sudo pkill -9 -x crimson-osd
+  qa/standalone/crimson/start_multi_osd.sh --spdk=$T --no-balancer 1 60 build/dev && \
+  qa/standalone/crimson/test_multi_osd.sh --jobs 8 --size 42g --iosize 300g --rw randwrite \
+    | tee bench_$T.log
+done
+grep -H 'TOTAL bw=' bench_tcp.log bench_vfiouser.log
+```
+
+Watch `build/dev/out/osd.0.log` (no `extent checksum inconsistent` / `Reactor
+stalled`) and the target log `/var/tmp/spdk_crimson_nvmf.log` (no `GPA to VVA
+failed`). Reference result (1 OSD, 60 GiB, 8 jobs, randwrite): `--spdk=tcp` ≈ 1530
+MiB/s, `--spdk=vfiouser` ≈ 2250 MiB/s.
+
+> **Note (2026-06-12 restack):** the simulation branch now sits on the
+> community PR stack (PRs 69275 + 69351 + 69352), which carries the
+> blocked-IO wakeup fix and the RBM reservation-gate fixes. The canonical
+> no-SPDK RBM run (90 GiB, 8 jobs, randwrite) is re-validated green on this
+> base: 3071 MiB/s, WAF 1.059, no wedge — parity with the previous control.
+>
+> **⚠ Small configurations** (e.g. `1 8` + `--jobs 1 --size 4g`) used to
+> wedge on the seastore blocked-IO missed-wakeup bug. The fix (PR 69275) is
+> now part of this branch's base, so the wedge is believed resolved, but
+> small configs have NOT been re-verified — prefer the canonical sizes
+> above (both backends are proven green over SPDK at 60 GiB).
 
 ### Inspecting WAF perf counters live
 
