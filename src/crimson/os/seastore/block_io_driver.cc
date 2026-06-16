@@ -4,6 +4,11 @@
 
 #include <stdexcept>
 
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 #include <seastar/core/reactor.hh>
 
 #include "include/buffer.h"
@@ -215,6 +220,21 @@ public:
         device = file;
         return device.size().then(
             [this, stat, path, FNAME](auto size) mutable {
+          if (size == 0) {
+            // seastar::file::size() reports 0 for a raw block device (the
+            // kernel returns st_size==0 from fstat on a block special file).
+            // Fall back to BLKGETSIZE64 to recover the real capacity. Needed
+            // by the simulation harness, which backs OSDs with null_blk / loop
+            // block devices.
+            int fd = ::open(path.c_str(), O_RDONLY);
+            if (fd >= 0) {
+              uint64_t bytes = 0;
+              if (::ioctl(fd, BLKGETSIZE64, &bytes) >= 0) {
+                size = bytes;
+              }
+              ::close(fd);
+            }
+          }
           stat.size = size;
           // Use Seastar's DMA alignment for optimal I/O alignment; clamp to
           // laddr_t::UNIT_SIZE since SeaStore operates at 4 KiB granularity
