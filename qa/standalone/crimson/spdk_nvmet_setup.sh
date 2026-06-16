@@ -35,9 +35,12 @@ SPDK_DIR="${CRIMSON_SPDK_DIR:-$REPO_ROOT/src/spdk}"
 NVMF_TGT="$SPDK_DIR/build/bin/nvmf_tgt"
 RPC_PY="$SPDK_DIR/scripts/rpc.py"
 # The build-tree nvmf_tgt's bdev plugin .so and libvfio-user are not on its
-# rpath; point the loader at the install prefix's lib dirs.
+# rpath; point the loader at the install prefix's lib dirs. libvfio-user.so is
+# built under build/libvfio-user (it is not copied into the SPDK install
+# prefix), so add its lib dir too or nvmf_tgt fails to load libvfio-user.so.0.
 SPDK_LIB="${CRIMSON_SPDK_LIB:-$SPDK_DIR/install/lib}"
-export LD_LIBRARY_PATH="$SPDK_LIB:$SPDK_LIB/../lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+VFIO_LIB="$SPDK_DIR/build/libvfio-user/build-release/lib"
+export LD_LIBRARY_PATH="$SPDK_LIB:$SPDK_LIB/../lib64:$VFIO_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 SOCK="/var/tmp/spdk_crimson_nvmf.sock"
 PIDFILE="/var/tmp/spdk_crimson_nvmf.pid"
