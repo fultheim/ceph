@@ -20,6 +20,7 @@
 #include <spdk/env.h>
 #include <spdk/nvme.h>
 #include <spdk/version.h>
+#include <rte_memory.h>
 
 #include "include/ceph_assert.h"
 #include "include/buffer.h"
@@ -53,8 +54,56 @@ void ensure_env()
     if (!iova_mode.empty()) {
       opts.iova_mode = iova_mode.c_str();
     }
+    // vfio-user shares this process's DMA memory with the target, which DMAs
+    // straight from it. libvfio-user caps a connection at MAX_DMA_REGIONS (64)
+    // DMA regions, and SPDK registers one region per virtually-contiguous DPDK
+    // allocation chunk (env_dpdk/memory.c). With the default dynamic heap the
+    // DMA recycle pool grows in scattered 2 MiB chunks under load, blows past 64
+    // regions, and the target can no longer translate those IOVAs ("GPA to VVA
+    // failed") -> EIO / silent corruption.
+    //
+    // Fix without touching SPDK: pre-grow the DPDK heap to cover the SeaStore DMA
+    // working set up front (-m). The pre-allocation is virtually contiguous, so
+    // it maps as a handful of regions once at connect, and the recycle pool then
+    // draws from that heap without triggering new allocation events (hence no new
+    // regions) under load. Single-file segments keep each region's backing fd
+    // shareable. TCP/PCIe never DMA our memory, so leave their env at the
+    // defaults (dynamic heap, no fixed size).
+    auto trid = crimson::common::local_conf().get_val<std::string>(
+      "seastore_spdk_transport_id");
+    bool vfio_user = trid.find("VFIOUSER") != std::string::npos;
+    if (vfio_user) {
+      opts.hugepage_single_segments = true;
+      // Pre-grow the heap (MiB) so it maps as a few contiguous DMA regions
+      // instead of growing past libvfio-user's 64-region cap under load. 0
+      // (the default) leaves DPDK dynamic; the test harness sets
+      // seastore_spdk_mem_size_mb for vfio-user runs.
+      opts.mem_size = static_cast<int>(
+        crimson::common::local_conf().get_val<int64_t>(
+          "seastore_spdk_mem_size_mb"));
+    }
     if (spdk_env_init(&opts) < 0) {
       throw std::runtime_error("spdk_env_init failed");
+    }
+    // Active whenever the vfio-user heap was pre-grown (opts.mem_size > 0, which
+    // is always the case above): a DPDK hugepage allocation after this point
+    // means the pre-grow was too small and the next vfio-user I/O would exceed
+    // libvfio-user's MAX_DMA_REGIONS=64 cap and fail with EIO silently. Aborting
+    // here fires before that bad I/O, with an actionable message. The callback
+    // is off the I/O path (only DPDK heap-growth events reach it), so it costs
+    // nothing once the heap is correctly sized.
+    if (vfio_user && opts.mem_size > 0) {
+      rte_mem_event_callback_register(
+        "seastore_vfio_dma_overflow",
+        [](enum rte_mem_event event, const void*, size_t len, void*) {
+          if (event == RTE_MEM_EVENT_ALLOC) {
+            ceph_abort_msg(
+              "DPDK allocated new hugepage(s) after vfio-user DMA registration: "
+              "seastore_spdk_mem_size_mb is too small. The next I/O touching "
+              "this range will exceed libvfio-user MAX_DMA_REGIONS=64 -> EIO. "
+              "Increase seastore_spdk_mem_size_mb.");
+          }
+        }, nullptr);
     }
   });
 }

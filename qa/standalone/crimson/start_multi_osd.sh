@@ -592,6 +592,15 @@ print(f'0x{mask:x}')
     # The loopback nvmet-tcp/vfio-user target has no IOMMU and the OSD is unprivileged, but
     # does no device DMA, so force VA addressing for the DPDK env.
     VSTART_EXTRA+=(-o "seastore_spdk_iova_mode = va")
+    if [ "$SPDK_TRANSPORT" = "vfiouser" ]; then
+        # vfio-user shares this process's DMA memory with the loopback target,
+        # which caps a connection at 64 DMA regions. Pre-grow the DPDK heap so it
+        # maps as a few contiguous regions instead of growing past the cap under
+        # load. 10 GiB covers the SeaStore DMA working set with headroom and is
+        # independent of device size. seastore turns on an overflow guard when
+        # this is > 0 and aborts if it proves too small, so raise it if that fires.
+        VSTART_EXTRA+=(-o "seastore_spdk_mem_size_mb = 10240")
+    fi
 fi
 if [ "$RBM_ENABLED" = "1" ]; then
     echo "[seastore] RBM enabled: setting seastore_main_device_type=RANDOM_BLOCK_SSD"

@@ -368,3 +368,20 @@ options:
     NVMe-oF/TCP initiator). Only consulted when seastore_spdk_transport_id is set.
   flags:
   - startup
+
+- name: seastore_spdk_mem_size_mb
+  type: int
+  level: advanced
+  desc: Pre-allocated SPDK/DPDK hugepage heap size in MiB (0 = DPDK default/dynamic)
+  long_desc: When > 0, the SPDK/DPDK environment pre-grows its hugepage heap to
+    this size at startup rather than growing it on demand. This is required for
+    the vfio-user local transport - the target DMAs directly from this process's
+    memory and libvfio-user caps a connection at 64 DMA regions, but a dynamic
+    heap grows in scattered 2 MiB chunks under load and exceeds that cap (the
+    target can then no longer translate the I/O command addresses). A single
+    up-front reservation maps as a few contiguous regions instead, so size this
+    to cover the SeaStore DMA working set. Only consulted when
+    seastore_spdk_transport_id selects the vfio-user transport.
+  default: 0
+  flags:
+  - startup
